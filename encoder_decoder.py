@@ -1,5 +1,7 @@
 import tensorflow as tf
 
+# Walking through the example at https://github.com/ematvey/tensorflow-seq2seq-tutorials/blob/master/2-seq2seq-advanced.ipynb
+# but with actual text data we get from elsewhere.
 
 enc_hidden_units = 1000
 dec_hidden_units = enc_hidden_units*2 # because the encoder will be bidirectional.
