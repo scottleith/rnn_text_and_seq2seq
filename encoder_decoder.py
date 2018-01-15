@@ -1,4 +1,4 @@
-
+import tensorflow as tf
 
 
 enc_hidden_units = 1000
@@ -15,7 +15,7 @@ dec_inp = tf.placeholder( shape = (None, None), dtype = tf.int32, name = "decode
 #dec_inp_len = tf.placeholder( shape = (None,), dtype = tf.int32, name = "decoder_input_lengths" ) # Possibly unnecessary. 
 dec_tgt = tf.placeholder( shape = (None, None), dtype = tf.int32, name = "decoder_targets") 
 
-# For when embeddings are provided directly, instead of trained and looked up.
+# For when embeddings are provided directly, instead of trained and looked up:
 # enc_inp_emb = tf.placeholder( shape = (None, None), dtype = tf.float32, name = "encoder_input_embeddings")
 
 # For when embeddings are trained and looked up.
@@ -24,11 +24,12 @@ embeddings = tf.Variable( tf.random_uniform( [vocab_size, embedding_size], -1., 
 enc_inp_emb = tf.nn.embedding_lookup( embeddings, enc_inp )
 dec_inp_emb = tf.nn.embedding_lookup( embeddings, dec_inp )
 
-# Primary cell
+
+
+# Encoder - Bidirectional RNN
 enc_cell_fw = tf.contrib.rnn.LSTMCell( enc_hidden_units )
 enc_cell_bw = tf.contrib.rnn.LSTMCell( enc_hidden_units )
 
-# Encoder - Bidirectional RNN
 ( (enc_fw_output, enc_bw_output),(enc_fw_finalstate, enc_bw_finalstate) ) = tf.nn.bidirectional_dynamic_rnn( cell_fw = enc_cell_fw, 
 									cell_bw = enc_cell_bw, 
 									inputs = enc_inp_emb, 
@@ -37,35 +38,22 @@ enc_cell_bw = tf.contrib.rnn.LSTMCell( enc_hidden_units )
 									time_major = True )
 
 enc_outputs = tf.concat( (enc_fw_output, enc_bw_output), 2 ) # concatenate along third axis - the hidden state
-
 enc_finalstate_c = tf.concat( (enc_fw_finalstate.c, enc_bw_finalstate.c), 1 ) # concat along second axis - cell state
 enc_finalstate_h = tf.concat( (enc_fw_finalstate.h, enc_bw_finalstate.h), 1 ) # concat along second axis - hidden state
 enc_finalstate = tf.contrib.rnn.LSTMStateTuple( c = enc_finalstate_c, h = enc_finalstate_h )
 
+
 # Decoder - raw_rnn
-
+# We are using tf.raw_rnn rather than the tf.nn.dynamic_rnn because the dynamic rnn does not allow us to feed
+# decoder-produced tokens as input for the next timestep. 
 dec_cell = tf.contrib.rnn.LSTMCell( dec_hidden_units )
-
 enc_max_time, batch_size = tf.unstack( tf.shape( enc_inp ) ) # Assumes zero-padding has already occurred.
 dec_len = enc_inp_len + 1 # Account for the <GO> tags that will be inserted at the start. 
 
-
-
-# The decoder must work like this:
-# output -> 
-# output projection via fully-connected layer -> 
-# prediction (argmax id) -> 
-# get input embedding for next timestep -> 
-# input the embedding
-
 # To get the output words at each decoder timestep, we must produce an actual word id prediction each time.
 # So, we create our own global output variables to call at each timestep:
-
 Wout = tf.Variable( tf.random_uniform( [dec_hidden_units, vocab_size], -1., 1.), dtype = tf.float32, name = "weights_output" )
 bout = tf.Variable( tf.zeros( [vocab_size] ), dtype = tf.float32, name = "biases_output" )
-
-# We are using tf.raw_rnn rather than the tf.nn.dynamic_rnn because the dynamic rnn does not allow us to feed
-# decoder-produced tokens as input for the next timestep. 
 
 eos_time_slice = tf.fill( [batch_size], 2, name = 'EOS')
 go_time_slice = tf.ones( [batch_size], dtype = tf.int32, name = 'GO' )
@@ -77,7 +65,6 @@ pad_step_embedded = tf.nn.embedding_lookup( embeddings, pad_time_slice ) # All I
 
 
 # The raw_rnn requires its initial state and transition behaviour to be defined.
-
 # Initial state:
 
 def loop_fn_initial():
@@ -97,16 +84,9 @@ def loop_fn_initial():
 # Transition behaviour:
 def loop_fn_transition( time, prev_output, prev_state, prev_loop_state ):
 	def get_next_input():
-		#input_use = np.random.randint(2) # This is for scheduled sampling. Doesn't work great (yet). 
-		#if input_use == 1:
 		output_logits = tf.add( tf.matmul( prev_output, Wout) , bout)
-		#dist = tf.contrib.distributions.OneHotCategorical( logits = output_logits )
-		#pred = dist.sample()
-		#pred = tf.argmax( pred, axis = 1 )
-		pred = tf.argmax( output_logits, axis = 1 ) # This works best so far. 
-		next_input = tf.nn.embedding_lookup( embeddings, pred ) # Could also be word lookup + embedding lookup
-#		else:
-#			next_input = dec_inp_emb[time]
+		pred = tf.argmax( output_logits, axis = 1 )  
+		next_input = tf.nn.embedding_lookup( embeddings, pred ) 
 		return next_input # The embedding for the word produced this timestep. 
 	elements_finished = (time >= dec_len) # Produces a boolnea tensor of [batch_size] which defines if the sequence has ended
 	finished = tf.reduce_all( elements_finished ) # Boolean scalar, False as long as there is one False
@@ -139,14 +119,11 @@ dec_outputs = dec_outputs_ta.stack()
 # This is supposed to take apart a [ time, batch, hidden_units ] shape tensor
 dec_max_steps, dec_batch_size, dec_dim = tf.unstack( tf.shape(dec_outputs) )
 enc_max_steps, enc_batch_size = tf.unstack( tf.shape(dec_tgt) )
-
 dec_outputs_flat = tf.reshape( dec_outputs, [-1, dec_hidden_units] ) # Flattens to [ t * b, h ] from [ t, b, h ]. 
 dec_logits_flat = tf.add( tf.matmul( dec_outputs_flat, Wout ), bout )
 dec_logits = tf.reshape( dec_logits_flat, (dec_max_steps, dec_batch_size, vocab_size) )
-
 dec_predict = tf.argmax( dec_logits, 2 ) # argmax over 3rd dimension (vocab_size) - which word is most likely?
-
-dec_labels = tf.one_hot( dec_tgt, depth = vocab_size, dtype = tf.float32 )
+dec_labels = tf.one_hot( dec_tgt, depth = vocab_size, dtype = tf.float32 ) # One-hot our labels and we're ready.
 stepwise_cross_entropy = tf.nn.softmax_cross_entropy_with_logits( labels = dec_labels, logits = dec_logits  )
 
 loss = tf.reduce_mean( stepwise_cross_entropy )
@@ -186,14 +163,9 @@ def run_epoch():
 					print( '  predicted > {}'.format(pred) )
 					if j > 4:
 						break
-	except KeyboardInterrupt:
-		print( 'Training Interrupted.' )
 
 
 for i in range(60):
-	try:
-		run_epoch()
-	except KeyboardInterrupt:
-		break
+	run_epoch()
 
 
